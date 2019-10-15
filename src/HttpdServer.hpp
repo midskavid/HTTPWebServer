@@ -9,7 +9,7 @@ using namespace std;
 class HttpdServer {
 public:
 	HttpdServer(INIReader& t_config);
-
+	void HandleChildConnection(int);
 	void launch();
 
 protected:
