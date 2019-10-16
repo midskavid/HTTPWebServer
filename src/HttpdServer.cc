@@ -2,6 +2,8 @@
 #include <string>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/select.h>
+#include <sys/time.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
@@ -100,8 +102,6 @@ void HttpdServer::launch() {
 #if 1
 		std::thread handleClient([this,clntSock]{HandleChildConnection(clntSock);});
 		handleClient.detach();
-		//HandleChildConnection(clntSock);
-		//std::thread handleClient(&HttpdServer::HandleChildConnection, this, clntSock);
 #else
 		if (!fork()) { // this is the child process
 			close(servSock); // child doesn't need the listener
@@ -122,7 +122,60 @@ void HttpdServer::HandleChildConnection(int clntSock) {
 	// set on an idle loop
 	auto log = logger();
 	log->info("Handling New Child {}", clntSock);
-	while (1) {
+	struct timeval tv;
+	tv.tv_sec = 5;
+	tv.tv_usec = 0;
+	bool handleCon = true;
+	while(handleCon)
+	{
+		fd_set rfds;
 
+		FD_ZERO(&rfds);
+		FD_SET(clntSock, &rfds);
+		const auto recVal = select(clntSock + 1, &rfds, NULL, NULL, &tv);
+		switch(recVal)
+		{
+			case(0):
+			{
+				//Timeout
+				log->info("Timeout {}", clntSock);
+				handleCon = false;
+				break;
+			}
+			case(-1):
+			{
+				//Error
+				log->info("Error encountered in select {}", clntSock);
+				break;
+			}
+			default:
+			{
+				/*Packet Data Type*/ 
+				#pragma message("I guess another select inside a loop might be required!!")
+				char pkt[100000];
+				if(recv(clntSock, &pkt, 100000*sizeof(char), 0) < 0)
+				{
+					//Failed to Recieve Data
+					log->info("Failed to receive data Child {}", clntSock);
+					break;
+				}
+				else
+				{
+					//Recieved Data!!
+					log->info("{}", pkt);
+					// Handle request
+					log->info("Received data Child {}", clntSock);
+				}
+				break;
+			}
+		}
 	}
+	log->info("Closing Child {}", clntSock);
+	if (close(clntSock) != 0)
+		log->info("Falied to close Child {}", clntSock);
+}
+
+void HttpdServer::ProcessRequest(std::string s) {
+	auto log = logger();
+	log->info("Closing Child {}", s);
 }

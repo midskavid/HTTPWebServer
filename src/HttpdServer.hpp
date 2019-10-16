@@ -7,9 +7,11 @@
 using namespace std;
 
 class HttpdServer {
+	void ProcessRequest(std::string);
+	void HandleChildConnection(int);
 public:
 	HttpdServer(INIReader& t_config);
-	void HandleChildConnection(int);
+	
 	void launch();
 
 protected:
