@@ -4,6 +4,7 @@
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <sys/time.h>
+#include <sys/stat.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
@@ -13,7 +14,8 @@
 #include "HttpdServer.hpp"
 
 #define MAXPENDING 5    /* Maximum outstanding connection requests */
-#define RCVBUFSIZE 32   /* Size of receive buffer */
+#define RCVBUFSIZE 10000   /* Size of receive buffer */
+#define SOCKET_READ_TIMEOUT_SEC 5
 
 HttpdServer::HttpdServer(INIReader& t_config)
 	: config(t_config)
@@ -33,7 +35,18 @@ HttpdServer::HttpdServer(INIReader& t_config)
 		exit(EX_CONFIG);
 	}
 	doc_root = dr;
+
+	// std::string mt = config.Get("httpd", "mime_types", "");
+	// if (mt=="") {
+	// 	log->error("mime_types was not in the config file");
+	// 	exit(EX_CONFIG);
+	// }
+	// mimeTypes=mt;
 }
+
+// void HttpdServer::ParseMimeFile(std::string fileName) {
+// 	fileName="";
+// }
 
 void HttpdServer::launch() {
 	auto log = logger();
@@ -41,7 +54,7 @@ void HttpdServer::launch() {
 	log->info("Launching web server");
 	log->info("Port: {}", port);
 	log->info("doc_root: {}", doc_root);
-
+	//log->info("mime_types: {}", mimeTypes);
 	// Put code here that actually launches your webserver...
 	addrinfo hints, *servinfo, *p;
 	int rv;
@@ -51,12 +64,12 @@ void HttpdServer::launch() {
 	hints.ai_family = AF_UNSPEC; // Prefer IPv6, but allow IPv4
 	hints.ai_socktype = SOCK_STREAM; // use TCP
 	hints.ai_flags = AI_PASSIVE; // we're going to be a server
-
+	log->info("jojo-1");
 	if ((rv = getaddrinfo(nullptr, port.c_str(), &hints, &servinfo)) != 0) {
 		log->info("Error getaddrinfo: {}", gai_strerror(rv));
 		exit(1);
 	}
-
+	log->info("jojo00");
 
 	for (p = servinfo; p != nullptr; p = p->ai_next) {
 		if ((servSock = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
@@ -70,7 +83,7 @@ void HttpdServer::launch() {
 		}
 		break;
 	}
-
+	log->info("jojo1");
 	freeaddrinfo(servinfo);
 	if (p == nullptr) {
 		log->info("Server failed to bind");
@@ -122,10 +135,11 @@ void HttpdServer::HandleChildConnection(int clntSock) {
 	// set on an idle loop
 	auto log = logger();
 	log->info("Handling New Child {}", clntSock);
-	struct timeval tv;
-	tv.tv_sec = 5;
-	tv.tv_usec = 0;
 	bool handleCon = true;
+	timeval tv;
+	tv.tv_sec = SOCKET_READ_TIMEOUT_SEC;
+	tv.tv_usec = 0;
+#if 0
 	while(handleCon)
 	{
 		fd_set rfds;
@@ -152,8 +166,10 @@ void HttpdServer::HandleChildConnection(int clntSock) {
 			{
 				/*Packet Data Type*/ 
 				#pragma message("I guess another select inside a loop might be required!!")
-				char pkt[100000];
-				if(recv(clntSock, &pkt, 100000*sizeof(char), 0) < 0)
+				char pkt[RCVBUFSIZE];
+				memset(pkt, 0, RCVBUFSIZE);
+				int len = 0;
+				if((len=recv(clntSock, &pkt, RCVBUFSIZE*sizeof(char), 0)) < 0)
 				{
 					//Failed to Recieve Data
 					log->info("Failed to receive data Child {}", clntSock);
@@ -162,20 +178,207 @@ void HttpdServer::HandleChildConnection(int clntSock) {
 				else
 				{
 					//Recieved Data!!
-					log->info("{}", pkt);
 					// Handle request
+					ProcessRequest(pkt, len, clntSock);
 					log->info("Received data Child {}", clntSock);
 				}
 				break;
 			}
 		}
 	}
+#else
+	setsockopt(clntSock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	std::string pending="";
+	while (handleCon) {
+		char pkt[RCVBUFSIZE];
+		memset(pkt, 0, RCVBUFSIZE);
+		auto recvLen = recv(clntSock, &pkt, RCVBUFSIZE*sizeof(char), 0);
+		if (recvLen==0) {
+			log->info("Connection closed by cliet {}", clntSock);
+			handleCon=false;
+		}
+		else if (recvLen==-1) {
+			//Error occurred
+			if ((errno == EAGAIN) || (errno != EWOULDBLOCK)) {
+				// TimedOut!
+				log->info("Timeout {}", clntSock);
+				handleCon = false;
+				if (pending.length()>0)
+				#pragma message("you might want to check if the socket has something to be read too...")
+					HandleTimeOut(clntSock);
+				break;
+			}
+		}
+		else {
+			// Handle msg.. In case of a partial msg, keep it in a buffer and append.
+			std::string allData(pkt);
+			allData = pending+allData;
+			auto pos = allData.rfind("\r\n\r\n");
+			if (pos!=std::string::npos) {
+				// Found something.. may have multiple msgs.. might also have a pending msg...
+				auto msg = allData.substr(0,pos+4);
+				ProcessRequests(msg, clntSock);
+				if (pos+4!=allData.length()) {
+					pending = allData.substr(pos+4+1,allData.length()-pos-4-1); 
+				}
+				else
+					pending="";
+			}
+			else {
+				// partial msg
+				pending=allData;
+			}
+		}
+	}
+#endif
 	log->info("Closing Child {}", clntSock);
 	if (close(clntSock) != 0)
 		log->info("Falied to close Child {}", clntSock);
 }
 
-void HttpdServer::ProcessRequest(std::string s) {
+void HttpdServer::ProcessRequests(std::string msgs, int clntSock) {
 	auto log = logger();
-	log->info("Closing Child {}", s);
+	std::string delimiter = "\r\n";
+	size_t pos=0;
+	while ((pos = msgs.find(delimiter+delimiter)) != std::string::npos) {
+		std::string response = "";
+		std::string s = msgs.substr(0, pos+delimiter.length()); 
+		msgs.erase(0, pos+2*delimiter.length());
+		std::vector<std::string> request;
+		bool sendBinary=false;
+
+		while ((pos = s.find(delimiter)) != std::string::npos) {
+			auto token = s.substr(0, pos);
+			log->info("{}",token);
+			request.emplace_back(token);
+			s.erase(0, pos+delimiter.length());
+		}
+
+		// Check request is well formed..
+		// Verify Header...
+		bool malformed=false; 
+		if (request[0].substr(0,3) != "GET")
+			malformed=true;
+		if (request[0].substr(request[0].length()-8,8) != "HTTP/1.1")
+			malformed=true;
+
+		bool closeConnection=false;
+		bool hostFound=false;
+		for (size_t ii=1; ii<request.size(); ++ii){
+			// verify key value pairs..
+			pos=request[ii].find(": ");
+			if (pos==std::string::npos)
+				malformed=true;
+			// Check if another key value exists without CRLF..
+			if (request[ii].rfind(": ")!=pos)
+				malformed=true;
+			if (request[ii].substr(0,pos)=="Connection"&&request[ii].substr(pos+2,request[ii].length()-pos-2)=="close")
+				closeConnection=true;
+			if (request[ii].substr(0,pos)=="Host")
+				hostFound=true;
+		}
+
+		std::string path=request[0].substr(4,request[0].length()-8-5);
+		if (malformed || !hostFound) {
+			response = CreateErrorResponse(ErrorResponse::ERR400);
+			closeConnection=true;
+		}
+		else if (!VerifyRequestPath(path)) {
+			response = CreateErrorResponse(ErrorResponse::ERR404);
+		}
+		else {
+			// Create response..
+			struct stat attrib;
+			auto fileExists = stat("path", &attrib)==0;
+			if (!fileExists) {
+				response = CreateErrorResponse(ErrorResponse::ERR404);
+			}
+			else {
+				// https://stackoverflow.com/questions/13542345/how-to-convert-st-mtime-which-get-from-stat-function-to-string-or-char
+				time_t t = attrib.st_mtime;
+				struct tm lt;
+				localtime_r(&t, &lt);
+				char timbuf[80];			
+				strftime(timbuf, sizeof(timbuf), "%d.%m.%Y %H:%M:%S", &lt);
+				std::string fileSize = std::to_string(int(attrib.st_size));
+				response=std::string("HTTP/1.1 200 OK\r\nServer: MyServer 1.0\r\nLast-Modified: ")+std::string(timbuf)+std::string("\r\nContent-Length: ")+fileSize+std::string("\r\nContent-Type: ")+std::string("\r\n\r\n");
+			}
+		}
+		
+		int ret=0;
+		int len=response.length();
+		do {
+			ret=send(clntSock, response.c_str(), response.size(), 0);
+			if (ret < 0) {
+				log->error("Client closed connection");
+				closeConnection=true;
+				break;
+			}
+			response = response.substr(0,response.length()-ret);
+			ret=0;
+			len=response.length();
+		}while (len<ret);
+
+		if (sendBinary) {
+			// open file and send...
+		}
+		if (closeConnection || malformed){
+			// break here ignoring other requests and close connection
+		}
+	}
+}
+
+bool HttpdServer::VerifyRequestPath(std::string& path) {
+	ParsePath(path);
+	//Check if the path is valid;
+	return true;
+}
+
+void HttpdServer::ParsePath(std::string& path) {
+	auto log = logger();
+	char *real_path = realpath(path.c_str(), nullptr);
+	if (real_path==nullptr) {
+		log->error("Null string constructed by realpath.. Path given to it {}", path);
+		return;
+	}
+	std::string newPath(real_path);
+	log->info("OldPath {}", path);
+	log->info("NewPath {}", newPath);
+	path=newPath;
+}
+
+std::string HttpdServer::CreateErrorResponse(ErrorResponse err) {
+	auto log = logger();
+	switch (err)
+	{
+	case ErrorResponse::ERR400 :
+		{
+		std::string err = "HTTP/1.1 400 Malformed Request\r\n";
+		return err;
+		}
+	case ErrorResponse::ERR404 :
+		{
+		std::string err = "HTTP/1.1 404 Requested file not found.\r\n";
+		return err;
+		}
+	default :
+		return "";
+	}
+}
+
+void HttpdServer::HandleTimeOut(int clntSock) {
+	std::string err = "HTTP/1.1 400 Connection TimedOut\r\n";
+	auto log=logger();
+	int ret=0;
+	int len=err.length();
+	do {
+		int ret = send(clntSock, err.c_str(), err.length(), 0);
+		if (ret == -1) {
+			log->error("Error occurred while sending.. exit for this child");
+			return;
+		}
+		err=err.substr(0,ret);
+		len=len-ret;
+		ret=0;
+	} while(ret<len);
 }
