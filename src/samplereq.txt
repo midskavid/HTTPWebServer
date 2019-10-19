@@ -1,4 +1,4 @@
-GET /home/midi/myhttpd/ HTTP/1.1
+GET /home/midi/myhttpd/kitten.jpg HTTP/1.1
 Host: www.cs.ucsd.edu
 User-Agent: MyTester v1.0
 Cookie: 123

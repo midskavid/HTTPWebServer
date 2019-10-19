@@ -5,10 +5,12 @@
 #include <sys/select.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#include <sys/sendfile.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
 #include <thread>
+#include <fstream>
 
 #include "logger.hpp"
 #include "HttpdServer.hpp"
@@ -36,17 +38,27 @@ HttpdServer::HttpdServer(INIReader& t_config)
 	}
 	doc_root = dr;
 
-	// std::string mt = config.Get("httpd", "mime_types", "");
-	// if (mt=="") {
-	// 	log->error("mime_types was not in the config file");
-	// 	exit(EX_CONFIG);
-	// }
-	// mimeTypes=mt;
+	std::string mt = config.Get("httpd", "mime_types", "");
+	if (mt=="") {
+		log->error("mime_types was not in the config file");
+		exit(EX_CONFIG);
+	}
+	mime_types=mt;
 }
 
-// void HttpdServer::ParseMimeFile(std::string fileName) {
-// 	fileName="";
-// }
+void HttpdServer::ParseMimeFile() {
+	std::ifstream fp(mime_types);
+	auto log=logger();
+	if (fp.fail()) {
+		log->error("MimeFile Not Found!!!");
+		return;
+	}
+	std::string key, val;
+	while (fp>>key>>val){
+		mimeTypes[key]=val;
+	}
+	log->info("Mime File parsed");
+}
 
 void HttpdServer::launch() {
 	auto log = logger();
@@ -54,22 +66,26 @@ void HttpdServer::launch() {
 	log->info("Launching web server");
 	log->info("Port: {}", port);
 	log->info("doc_root: {}", doc_root);
-	//log->info("mime_types: {}", mimeTypes);
+	log->info("mime_types: {}", mime_types);
+
+	log->info("Parsing MimeFile");
+	ParseMimeFile();
+
 	// Put code here that actually launches your webserver...
 	addrinfo hints, *servinfo, *p;
 	int rv;
-  	int servSock;                    /* Socket descriptor for server */
+  int servSock;                    /* Socket descriptor for server */
 
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_UNSPEC; // Prefer IPv6, but allow IPv4
 	hints.ai_socktype = SOCK_STREAM; // use TCP
 	hints.ai_flags = AI_PASSIVE; // we're going to be a server
-	log->info("jojo-1");
+
 	if ((rv = getaddrinfo(nullptr, port.c_str(), &hints, &servinfo)) != 0) {
 		log->info("Error getaddrinfo: {}", gai_strerror(rv));
 		exit(1);
 	}
-	log->info("jojo00");
+
 
 	for (p = servinfo; p != nullptr; p = p->ai_next) {
 		if ((servSock = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
@@ -83,7 +99,7 @@ void HttpdServer::launch() {
 		}
 		break;
 	}
-	log->info("jojo1");
+	
 	freeaddrinfo(servinfo);
 	if (p == nullptr) {
 		log->info("Server failed to bind");
@@ -246,6 +262,7 @@ void HttpdServer::ProcessRequests(std::string msgs, int clntSock) {
 		msgs.erase(0, pos+2*delimiter.length());
 		std::vector<std::string> request;
 		bool sendBinary=false;
+		int getFileSize=0;
 
 		while ((pos = s.find(delimiter)) != std::string::npos) {
 			auto token = s.substr(0, pos);
@@ -289,19 +306,32 @@ void HttpdServer::ProcessRequests(std::string msgs, int clntSock) {
 		else {
 			// Create response..
 			struct stat attrib;
-			auto fileExists = stat("path", &attrib)==0;
+			auto fileExists = stat(path.c_str(), &attrib)==0;
 			if (!fileExists) {
 				response = CreateErrorResponse(ErrorResponse::ERR404);
 			}
 			else {
+				auto posE = path.rfind(".");
+				std::string extn = "";
+				if (posE==std::string::npos) {
+					// no extension!!!!
+					#pragma message("No extension found!!!")
+				}
+				else {
+					extn=path.substr(posE);
+				}
+				log->info("File extension {}",extn);
 				// https://stackoverflow.com/questions/13542345/how-to-convert-st-mtime-which-get-from-stat-function-to-string-or-char
 				time_t t = attrib.st_mtime;
 				struct tm lt;
 				localtime_r(&t, &lt);
 				char timbuf[80];			
 				strftime(timbuf, sizeof(timbuf), "%d.%m.%Y %H:%M:%S", &lt);
-				std::string fileSize = std::to_string(int(attrib.st_size));
-				response=std::string("HTTP/1.1 200 OK\r\nServer: MyServer 1.0\r\nLast-Modified: ")+std::string(timbuf)+std::string("\r\nContent-Length: ")+fileSize+std::string("\r\nContent-Type: ")+std::string("\r\n\r\n");
+				getFileSize = int(attrib.st_size);
+				std::string fileSize = std::to_string(getFileSize);
+				#pragma message("CHeck if extension is not found")
+				response=std::string("HTTP/1.1 200 OK\r\nServer: MyServer 1.0\r\nLast-Modified: ")+std::string(timbuf)+std::string("\r\nContent-Length: ")+fileSize+std::string("\r\nContent-Type: ")+mimeTypes[extn]+std::string("\r\n\r\n");
+				sendBinary=true;
 			}
 		}
 		
@@ -321,6 +351,16 @@ void HttpdServer::ProcessRequests(std::string msgs, int clntSock) {
 
 		if (sendBinary) {
 			// open file and send...
+			int ret=0;
+			//std::ifstream inputF(path, std::ios::binary );
+			FILE *fptr = fopen(path.c_str(),"rb");
+			int inputF = fileno(fptr);
+			off_t offset=0;
+			do {
+				ret = sendfile(clntSock, inputF , &offset, getFileSize);
+				getFileSize -= ret;
+			}while(getFileSize>0);
+
 		}
 		if (closeConnection || malformed){
 			// break here ignoring other requests and close connection
@@ -329,8 +369,14 @@ void HttpdServer::ProcessRequests(std::string msgs, int clntSock) {
 }
 
 bool HttpdServer::VerifyRequestPath(std::string& path) {
+	if (path[0]!='/')
+		return false;
+	#pragma message (" verify ending / or begining / ")
+	if (path=="/")
+		path="/index.html";
+
+	path=doc_root+path; // remove /
 	ParsePath(path);
-	//Check if the path is valid;
 	return true;
 }
 

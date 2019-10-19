@@ -15,12 +15,12 @@ class HttpdServer {
 	void ParsePath(std::string& path);
 	void HandleChildConnection(int);
 	void HandleTimeOut(int);
-	//void ParseMimeFile(std::string);
+	void ParseMimeFile();
 	bool VerifyRequestPath(std::string& path);
 	std::string CreateErrorResponse(ErrorResponse);
 	
 	// Member variables
-	//std::unordered_map<std::string,std::string> mimeType;
+	std::unordered_map<std::string,std::string> mimeTypes;
 
 public:
 	HttpdServer(INIReader& t_config);
@@ -30,7 +30,7 @@ protected:
 	INIReader& config;
 	string port;
 	string doc_root;
-	std::string mimeTypes="";
+	std::string mime_types;
 };
 
 #endif // HTTPDSERVER_HPP
