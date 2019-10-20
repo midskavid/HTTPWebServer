@@ -11,7 +11,7 @@
 #include <unistd.h>
 #include <thread>
 #include <fstream>
-
+#include <iostream>
 #include "logger.hpp"
 #include "HttpdServer.hpp"
 
@@ -37,13 +37,25 @@ HttpdServer::HttpdServer(INIReader& t_config)
 		exit(EX_CONFIG);
 	}
 	doc_root = dr;
-
+	// Handle ~...
+	char* home;
+	home = getenv("HOME");
+	if (doc_root[0]=='~') {
+		// realpath does not handle ~
+		char *real_path=realpath((std::string (home)+doc_root.substr(1)).c_str(), nullptr);
+		doc_root = std::string (real_path);
+	}
 	std::string mt = config.Get("httpd", "mime_types", "");
 	if (mt=="") {
 		log->error("mime_types was not in the config file");
 		exit(EX_CONFIG);
 	}
 	mime_types=mt;
+	if (mime_types[0]=='~') {
+		// handle ~
+		char *real_path=realpath((std::string (home)+mime_types.substr(1)).c_str(), nullptr);
+		mime_types = std::string (real_path);
+	}
 }
 
 void HttpdServer::ParseMimeFile() {
@@ -74,7 +86,7 @@ void HttpdServer::launch() {
 	// Put code here that actually launches your webserver...
 	addrinfo hints, *servinfo, *p;
 	int rv;
-  int servSock;                    /* Socket descriptor for server */
+ 	int servSock;                    /* Socket descriptor for server */
 
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_UNSPEC; // Prefer IPv6, but allow IPv4
@@ -233,7 +245,7 @@ void HttpdServer::HandleChildConnection(int clntSock) {
 			if (pos!=std::string::npos) {
 				// Found something.. may have multiple msgs.. might also have a pending msg...
 				auto msg = allData.substr(0,pos+4);
-				ProcessRequests(msg, clntSock);
+				handleCon = ProcessRequests(msg, clntSock);
 				if (pos+4!=allData.length()) {
 					pending = allData.substr(pos+4+1,allData.length()-pos-4-1); 
 				}
@@ -252,7 +264,7 @@ void HttpdServer::HandleChildConnection(int clntSock) {
 		log->info("Falied to close Child {}", clntSock);
 }
 
-void HttpdServer::ProcessRequests(std::string msgs, int clntSock) {
+bool HttpdServer::ProcessRequests(std::string msgs, int clntSock) {
 	auto log = logger();
 	std::string delimiter = "\r\n";
 	size_t pos=0;
@@ -274,9 +286,9 @@ void HttpdServer::ProcessRequests(std::string msgs, int clntSock) {
 		// Check request is well formed..
 		// Verify Header...
 		bool malformed=false; 
-		if (request[0].substr(0,3) != "GET")
+		if (request[0].substr(0,4) != "GET ")
 			malformed=true;
-		if (request[0].substr(request[0].length()-8,8) != "HTTP/1.1")
+		if (request[0].substr(request[0].length()-9) != " HTTP/1.1")
 			malformed=true;
 
 		bool closeConnection=false;
@@ -316,9 +328,11 @@ void HttpdServer::ProcessRequests(std::string msgs, int clntSock) {
 				if (posE==std::string::npos) {
 					// no extension!!!!
 					#pragma message("No extension found!!!")
+					sendBinary=false;
 				}
 				else {
 					extn=path.substr(posE);
+					sendBinary=true;
 				}
 				log->info("File extension {}",extn);
 				// https://stackoverflow.com/questions/13542345/how-to-convert-st-mtime-which-get-from-stat-function-to-string-or-char
@@ -329,9 +343,16 @@ void HttpdServer::ProcessRequests(std::string msgs, int clntSock) {
 				strftime(timbuf, sizeof(timbuf), "%d.%m.%Y %H:%M:%S", &lt);
 				getFileSize = int(attrib.st_size);
 				std::string fileSize = std::to_string(getFileSize);
-				#pragma message("CHeck if extension is not found")
-				response=std::string("HTTP/1.1 200 OK\r\nServer: MyServer 1.0\r\nLast-Modified: ")+std::string(timbuf)+std::string("\r\nContent-Length: ")+fileSize+std::string("\r\nContent-Type: ")+mimeTypes[extn]+std::string("\r\n\r\n");
-				sendBinary=true;
+				std::string extenFound = "application/octet-stream";
+				if (mimeTypes.count(extn)>0) {
+					extenFound = mimeTypes[extn];
+				}
+				
+				if (!closeConnection)
+					response=std::string("HTTP/1.1 200 OK\r\nServer: MyServer 1.0\r\nLast-Modified: ")+std::string(timbuf)+std::string("\r\nContent-Length: ")+fileSize+std::string("\r\nContent-Type: ")+extenFound+std::string("\r\n\r\n");
+				else 
+					response=std::string("HTTP/1.1 200 OK\r\nServer: MyServer 1.0\r\nLast-Modified: ")+std::string(timbuf)+std::string("\r\nContent-Length: ")+fileSize+std::string("\r\nContent-Type: ")+extenFound+std::string("\r\nConnection: close")+std::string("\r\n\r\n");
+				log->info("{}",response);
 			}
 		}
 		
@@ -364,11 +385,14 @@ void HttpdServer::ProcessRequests(std::string msgs, int clntSock) {
 		}
 		if (closeConnection || malformed){
 			// break here ignoring other requests and close connection
+			return false;
 		}
 	}
+	return true;
 }
 
 bool HttpdServer::VerifyRequestPath(std::string& path) {
+	auto log = logger();
 	if (path[0]!='/')
 		return false;
 	#pragma message (" verify ending / or begining / ")
@@ -377,6 +401,12 @@ bool HttpdServer::VerifyRequestPath(std::string& path) {
 
 	path=doc_root+path; // remove /
 	ParsePath(path);
+
+	// now check if the initial portions match..
+	if (doc_root != path.substr(0,doc_root.length())) {
+		log->info ("Malformed URL");
+		return false;
+	}
 	return true;
 }
 

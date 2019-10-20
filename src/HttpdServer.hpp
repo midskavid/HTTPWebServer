@@ -11,7 +11,7 @@ class HttpdServer {
 	enum ErrorResponse {ERR404, ERR400};
 
 	// Member Functions
-	void ProcessRequests(std::string, int);
+	bool ProcessRequests(std::string, int);
 	void ParsePath(std::string& path);
 	void HandleChildConnection(int);
 	void HandleTimeOut(int);
