@@ -308,7 +308,7 @@ bool HttpdServer::ProcessRequests(std::string msgs, int clntSock) {
 		}
 
 		std::string path=request[0].substr(4,request[0].length()-8-5);
-		if (malformed || !hostFound) {
+		if (malformed || !hostFound || path[0]!='/') {
 			response = CreateErrorResponse(ErrorResponse::ERR400);
 			closeConnection=true;
 		}
@@ -327,7 +327,6 @@ bool HttpdServer::ProcessRequests(std::string msgs, int clntSock) {
 				std::string extn = "";
 				if (posE==std::string::npos) {
 					// no extension!!!!
-					#pragma message("No extension found!!!")
 					sendBinary=false;
 				}
 				else {
@@ -381,6 +380,7 @@ bool HttpdServer::ProcessRequests(std::string msgs, int clntSock) {
 				ret = sendfile(clntSock, inputF , &offset, getFileSize);
 				getFileSize -= ret;
 			}while(getFileSize>0);
+			fclose(fptr);
 
 		}
 		if (closeConnection || malformed){
@@ -393,9 +393,6 @@ bool HttpdServer::ProcessRequests(std::string msgs, int clntSock) {
 
 bool HttpdServer::VerifyRequestPath(std::string& path) {
 	auto log = logger();
-	if (path[0]!='/')
-		return false;
-	#pragma message (" verify ending / or begining / ")
 	if (path=="/")
 		path="/index.html";
 
@@ -429,12 +426,12 @@ std::string HttpdServer::CreateErrorResponse(ErrorResponse err) {
 	{
 	case ErrorResponse::ERR400 :
 		{
-		std::string err = "HTTP/1.1 400 Malformed Request\r\n";
+		std::string err = "HTTP/1.1 400 Client Error\r\nServer: MyServer 1.0\r\n\r\n";
 		return err;
 		}
 	case ErrorResponse::ERR404 :
 		{
-		std::string err = "HTTP/1.1 404 Requested file not found.\r\n";
+		std::string err = "HTTP/1.1 404 Not Found\r\nServer: MyServer 1.0\r\n\r\n";
 		return err;
 		}
 	default :

@@ -1,0 +1,6 @@
+GET /../myhttpd/index1.html HTTP/1.1
+Host: www.cs.ucsd.edu
+User-Agent: MyTester v1.0
+Cookie: 123
+
+
